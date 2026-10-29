@@ -7,9 +7,12 @@ use soroban_sdk::{
 };
 
 // Create helper to deploy a mock token for testing
-fn create_mock_token<'a>(env: &Env, admin: &Address) -> soroban_sdk::token::Client<'a> {
+fn create_mock_token<'a>(env: &Env, admin: &Address) -> (soroban_sdk::token::Client<'a>, soroban_sdk::token::StellarAssetClient<'a>) {
     let token_address = env.register_stellar_asset_contract(admin.clone());
-    soroban_sdk::token::Client::new(env, &token_address)
+    (
+        soroban_sdk::token::Client::new(env, &token_address),
+        soroban_sdk::token::StellarAssetClient::new(env, &token_address),
+    )
 }
 
 #[test]
@@ -22,10 +25,10 @@ fn test_full_contract_lifecycle() {
     let landlord = Address::generate(&env);
 
     // 1. Deploy & Initialize Mock Token
-    let token = create_mock_token(&env, &admin);
+    let (token, admin_token) = create_mock_token(&env, &admin);
 
     // Mint some initial tokens to the tenant to fund their savings plan
-    token.mint(&tenant, &5000);
+    admin_token.mint(&tenant, &5000);
     assert_eq!(token.balance(&tenant), 5000);
 
     // 2. Deploy & Initialize Rentar Contract
@@ -46,7 +49,7 @@ fn test_full_contract_lifecycle() {
     let target_goal = 2000;
     // Set lock duration for 1 day in the future (86400 seconds)
     let current_timestamp = 100000;
-    env.ledger().set_timestamp(current_timestamp);
+    env.ledger().with_mut(|li| li.timestamp = current_timestamp);
     let lock_until = current_timestamp + 86400;
     let monthly_target = 1000;
 
@@ -97,7 +100,7 @@ fn test_full_contract_lifecycle() {
     assert_eq!(vault.goal_reached, false); // Balance fell below target goal (2000), state is updated
 
     // 7. Fast forward time past the Lock-until threshold
-    env.ledger().set_timestamp(lock_until + 1);
+    env.ledger().with_mut(|li| li.timestamp = lock_until + 1);
     
     // Authorized withdraw should succeed now
     client.withdraw(&tenant, &100);
@@ -107,7 +110,7 @@ fn test_full_contract_lifecycle() {
     assert_eq!(vault.balance, 995);
 
     // 8. Create Secure Escrow payment for Landlord
-    token.mint(&tenant, &2000);
+    admin_token.mint(&tenant, &2000);
     let escrow_id = client.create_escrow(&tenant, &landlord, &1500, &(lock_until + 10000));
     
     let escrow = client.get_escrow(&landlord, &escrow_id);
@@ -121,7 +124,7 @@ fn test_full_contract_lifecycle() {
     assert!(release_res.is_err());
 
     // Advance ledger time past escrow lock
-    env.ledger().set_timestamp(lock_until + 10001);
+    env.ledger().with_mut(|li| li.timestamp = lock_until + 10001);
     client.release_escrow(&landlord, &escrow_id);
 
     // Landlord balance check (was 1000, now +1500 = 2500)
@@ -155,8 +158,8 @@ fn test_withdraw_underflow() {
     let landlord = Address::generate(&env);
 
     // Set up token, contract, and vault
-    let token = create_mock_token(&env, &admin);
-    token.mint(&tenant, &1000);
+    let (token, admin_token) = create_mock_token(&env, &admin);
+    admin_token.mint(&tenant, &1000);
 
     let contract_id = env.register_contract(None, RentarContract);
     let client = RentarContractClient::new(&env, &contract_id);
@@ -165,7 +168,7 @@ fn test_withdraw_underflow() {
 
     // Lock period in the past so withdrawals are not blocked by SavingsLocked
     let past_lock: u64 = 0;
-    env.ledger().set_timestamp(1000);
+    env.ledger().with_mut(|li| li.timestamp = 1000);
 
     let description = String::from_str(&env, "Underflow Test Vault");
     client.create_vault(&tenant, &landlord, &500, &past_lock, &100, &description);
@@ -191,4 +194,42 @@ fn test_withdraw_underflow() {
     client.withdraw(&tenant, &200);
     let vault = client.get_vault(&tenant);
     assert_eq!(vault.balance, 0, "Balance should be zero after full withdrawal");
+}
+
+#[test]
+fn test_storage_ttl_bump_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let tenant = Address::generate(&env);
+    let landlord = Address::generate(&env);
+
+    let (token, admin_token) = create_mock_token(&env, &admin);
+    admin_token.mint(&tenant, &2000);
+
+    let contract_id = env.register_contract(None, RentarContract);
+    let client = RentarContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin, &token.address, &10);
+
+    // Create vault
+    let description = String::from_str(&env, "TTL Bump Test Vault");
+    client.create_vault(&tenant, &landlord, &1000, &5000, &200, &description);
+
+    // Create escrow
+    let escrow_id = client.create_escrow(&tenant, &landlord, &500, &10000);
+
+    // Test bump_vault_ttl succeeds for existing vault
+    assert!(client.try_bump_vault_ttl(&tenant).is_ok());
+
+    // Test bump_escrow_ttl succeeds for existing escrow
+    assert!(client.try_bump_escrow_ttl(&landlord, &escrow_id).is_ok());
+
+    // Test bump_vault_ttl fails for nonexistent tenant
+    let non_tenant = Address::generate(&env);
+    assert!(client.try_bump_vault_ttl(&non_tenant).is_err());
+
+    // Test bump_escrow_ttl fails for nonexistent escrow ID
+    assert!(client.try_bump_escrow_ttl(&landlord, &999).is_err());
 }

@@ -23,14 +23,22 @@ Instance storage is bundled with the contract instance. We store `AdminConfig` a
 ### 2. Persistent Storage for Large User Entities
 `SavingsVault` and `LandlordEscrow` are placed in persistent storage because they vary in size, grow linearly with user count, and are unique to user accounts. Placing them in instance storage would make the instance size grow prohibitively large.
 
-### 3. Dynamic TTL Extensions (`extend_ttl_info`)
-To prevent data eviction and user fund lockups:
-- When a user vault is created or updated, the contract triggers:
+### 3. Dynamic TTL Extensions & Rent-Cycle Lifecycle Safeguards
+To prevent storage archival and ensure user funds remain un-archived across real-world monthly rental cycles:
+- Previous defaults (10,000 ledgers threshold / 100,000 ledgers extension) provided only ~16 hours minimum threshold and ~6.9 days maximum extension at ~6 seconds per Stellar ledger. For a monthly rent product where users interact once per 30 days, this introduced high risk of state eviction.
+- **Updated Production Constants**:
+  - `VAULT_TTL_THRESHOLD`: `50_000` ledgers (~3.5 days minimum)
+  - `VAULT_TTL_EXTEND`: `500_000` ledgers (~35–40 days maximum extension)
+  - `ESCROW_TTL_THRESHOLD`: `50_000` ledgers
+  - `ESCROW_TTL_EXTEND`: `500_000` ledgers
+- When a user vault is created, updated, or deposited into:
   ```rust
-  env.storage().persistent().extend_ttl_info(
+  env.storage().persistent().extend_ttl(
       &DataKey::Vault(tenant),
-      10000,  // minimum threshold (~1.3 days)
-      100000, // extend to ~13.8 days
+      VAULT_TTL_THRESHOLD,
+      VAULT_TTL_EXTEND,
   );
   ```
-- Similarly, creating or releasing a landlord escrow extends its lifetime. This ensures active vaults and escrows never expire due to storage rent rules.
+- Creating a landlord escrow executes an identical TTL extension for `DataKey::Escrow(landlord, escrow_id)`.
+- **On-Chain & Off-Chain Bump Instructions**:
+  - For long-lived vaults or escrows waiting for future claim dates without deposits, the contract exposes `bump_vault_ttl(env, tenant)` and `bump_escrow_ttl(env, landlord, escrow_id)` callable permissionlessly or via automated off-chain cron heartbeats to bump TTL before expiration.

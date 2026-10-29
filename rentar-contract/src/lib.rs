@@ -42,6 +42,14 @@ fn set_admin_config(env: &Env, config: &AdminConfig) {
     env.storage().instance().set(&DataKey::AdminConfig, config);
 }
 
+/// Storage TTL thresholds and extension bounds
+/// Raised to 50,000 threshold (~3.5 days at 6s/ledger) and 500,000 extension (~35-40 days / rent-cycle scale)
+/// to safeguard long-lived tenant vaults and landlord escrows against archival.
+pub const VAULT_TTL_THRESHOLD: u32 = 50_000;
+pub const VAULT_TTL_EXTEND: u32 = 500_000;
+pub const ESCROW_TTL_THRESHOLD: u32 = 50_000;
+pub const ESCROW_TTL_EXTEND: u32 = 500_000;
+
 // Helper to fetch vault
 fn get_vault_opt(env: &Env, tenant: &Address) -> Option<SavingsVault> {
     env.storage().persistent().get(&DataKey::Vault(tenant.clone()))
@@ -53,8 +61,8 @@ fn set_vault(env: &Env, tenant: &Address, vault: &SavingsVault) {
     // Extend TTL to optimize storage and prevent eviction (standard practice in Soroban)
     env.storage().persistent().extend_ttl(
         &DataKey::Vault(tenant.clone()),
-        10000,  // minimum threshold
-        100000, // lifetime extension
+        VAULT_TTL_THRESHOLD,
+        VAULT_TTL_EXTEND,
     );
 }
 
@@ -343,7 +351,7 @@ impl RentarContract {
 
         let key = DataKey::Escrow(landlord.clone(), id_counter);
         env.storage().persistent().set(&key, &escrow);
-        env.storage().persistent().extend_ttl(&key, 10000, 100000);
+        env.storage().persistent().extend_ttl(&key, ESCROW_TTL_THRESHOLD, ESCROW_TTL_EXTEND);
 
         // Emit SavingsCreated event (or Escrow created notice)
         env.events().publish(
@@ -455,5 +463,27 @@ impl RentarContract {
     /// Query helper to view current administrator configuration details.
     pub fn get_admin_config(env: Env) -> Result<AdminConfig, Error> {
         get_admin_config_opt(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// Bumps the persistent storage TTL for a tenant's vault to ensure long-term availability across rent cycles.
+    pub fn bump_vault_ttl(env: Env, tenant: Address) -> Result<(), Error> {
+        check_paused(&env)?;
+        let key = DataKey::Vault(tenant.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::VaultNotFound);
+        }
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_EXTEND);
+        Ok(())
+    }
+
+    /// Bumps the persistent storage TTL for a landlord's escrow entry.
+    pub fn bump_escrow_ttl(env: Env, landlord: Address, escrow_id: u64) -> Result<(), Error> {
+        check_paused(&env)?;
+        let key = DataKey::Escrow(landlord.clone(), escrow_id);
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::EscrowNotFound);
+        }
+        env.storage().persistent().extend_ttl(&key, ESCROW_TTL_THRESHOLD, ESCROW_TTL_EXTEND);
+        Ok(())
     }
 }
